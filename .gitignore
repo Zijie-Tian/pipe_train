@@ -1,0 +1,15 @@
+# ignore generated html files,
+*.csv
+*.xlsx
+*.json
+*.out
+*.ilp
+*.obj
+*.nsys-rep
+core
+gpt-j-6B
+wandb
+wrapper_libs
+nsys_output
+# except foo.html which is maintained by hand
+
