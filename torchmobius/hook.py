@@ -80,13 +80,15 @@ def _pre_module_forward_function(module, bind_dic):
         for _, param in module.named_parameters(recurse=True):
             while True:
                 if param.mobius_tensor_attr.get_position() == MobiusPosistion.GPU:
+                    # NOTE(fyy) dirty sync
+                    if torch.isnan(param.mobius_tensor_attr.device_param_tensor.data).any():
+                        print('nan in upload')
+                        exit(-1)
                     break
                 # FIXME inference
                 else:
                     param.mobius_tensor_attr.upload_param()
-                    
-                    # NOTE(fyy) dirty sync
-                    # assert param.mobius_tensor_attr.device_param_tensor != None
+                
                     # if torch.isnan(param.mobius_tensor_attr.device_param_tensor).any():
                     #     print("device_param_tensor : ", param.mobius_tensor_attr.device_param_tensor)
                     #     exit(-1)
@@ -130,9 +132,13 @@ def _pre_module_backward_function(module, output):
         for _, param in module.named_parameters(recurse=True):
             while True:
                 if param.mobius_tensor_attr.get_position() == MobiusPosistion.GPU:
+                    if torch.isnan(param.mobius_tensor_attr.device_param_tensor.data).any():
+                        print('nan in upload')
+                        exit(-1)
                     break
                 else:
                     param.mobius_tensor_attr.upload_param()
+                    
                     # if torch.isnan(param.mobius_tensor_attr.device_param_tensor).any():
                     #     print("device_param_tensor : ", param.mobius_tensor_attr.device_param_tensor)
                     #     exit(-1)

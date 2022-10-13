@@ -25,6 +25,8 @@ from torchmobius.attribute import (MobiusModuleAttribute, MobiusTensorAttribute,
 from torchmobius.hook import register_hooks_on_module
 from torchmobius.utils import mobius_logger
 
+import torchmobius.attribute
+
 Device = Union[torch.device, int, str]
 Devices = Union[Iterable[Device], List[Device]]
 
@@ -332,6 +334,7 @@ class MobiusKernel(Module):
     def forward(self, input: TensorOrTensors, _labels=None, fix_head_number = 1) -> TensorOrTensors:  # type: ignore
         
         torchmobius.hook.FORWARD_FLAG = True
+        torchmobius.attribute.GRADIENT_OVERFLOW = False
 
         microbatch.check(input)
 

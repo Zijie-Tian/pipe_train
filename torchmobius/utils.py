@@ -275,11 +275,11 @@ def clip_grad_norm_(parameters, max_norm, norm_type=2):
                 
         total_norm = torch.norm(torch.stack([torch.norm(p.grad.detach(), norm_type, dtype=torch.float32).to(device) for p in parameters]), norm_type)
     
-    print("total_norm", total_norm)
+    # print("total_norm", total_norm)
     total_norm = total_norm.to(torch.float16)
-    print("total_norm", total_norm)
+    # print("total_norm", total_norm)
     clip_coef = max_norm / (total_norm + 1e-6)
-    print("clip_coef", clip_coef)
+    # print("clip_coef", clip_coef)
 
     if clip_coef < 1:
         for p in parameters:
@@ -310,6 +310,10 @@ def _has_inf_or_nan(x, j=None):
         if cpu_sum == float('inf') or cpu_sum == -float('inf') or cpu_sum != cpu_sum:
             return True
         return False
+    
+    if torch.isnan(x).any() or torch.isinf(x).any():
+        return True
+    return False
     
 def has_overflow_serial(params):
     for p in params:

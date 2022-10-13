@@ -24,6 +24,8 @@ TensorOrTensors = Union[Tensor, Tensors]
 FORWARD_MICROBTAH_NUM = 0
 BACKWARD_MICROBATCH_NUM = 0
 
+GRADIENT_OVERFLOW = False
+
 class MobiusModuleAttribute(object):
     def __init__(self,
                  microbatch_num: int,
@@ -260,7 +262,6 @@ class MobiusTensorAttribute(object):
     def upload_param(self):
         if self.position == MobiusPosistion.GPU:
             return 
-        torch.cuda.nvtx.range_push(f'upload param')
         with use_stream(self.upload_stream):
             # get a tensor from allocator
             if  self.device_mem.dtype == self.cpu_param_tensor.dtype:
@@ -281,10 +282,10 @@ class MobiusTensorAttribute(object):
             else:
                 self.device_param_tensor.data = self.cpu_param_tensor.to(self.device, non_blocking=True).view(self.shape)
                 
-            # if torch.isnan(self.device_param_tensor.data).any():
-            #     print('nan in upload')
-            #     print("device_param_tensor : ", self.device_param_tensor)
-            #     exit(-1)
+            if torch.isnan(self.device_param_tensor.data).any():
+                print('nan in upload')
+                print("device_param_tensor : ", self.device_param_tensor)
+                exit(-1)
 
 
             # if activation, cpu buffer should be freed
@@ -325,13 +326,22 @@ class MobiusTensorAttribute(object):
 
         with use_stream(self.offload_stream):
             # transfer grad     
-            # if not torch.isnan(self.device_param_tensor.grad).any():
-            self.cpu_param_tensor.grad.copy_(self.device_param_tensor.grad, non_blocking=True)
-        
-            # if torch.isnan(self.cpu_param_tensor.grad).any() or torch.isnan(self.device_param_tensor.grad).any():
+            if not torch.isnan(self.device_param_tensor.grad).any():
+                self.cpu_param_tensor.grad.copy_(self.device_param_tensor.grad, non_blocking=True)
+            # if not GRADIENT_OVERFLOW:
+            #     if not torch.isnan(self.device_param_tensor.grad).any():
+            #         self.cpu_param_tensor.grad.copy_(self.device_param_tensor.grad, non_blocking=True)
+            #     else:
+            #         GRADIENT_OVERFLOW = True
+
+            # a = torch.isnan(self.cpu_param_tensor.grad).any()
+            # b = torch.isnan(self.device_param_tensor.grad).any()
+            # if a or b:
             #     print('nan or inf in grad')
             #     print("cpu_param_tensor ", self.cpu_param_tensor.grad)
+            #     print(a)
             #     print("device_param_tensor ", self.device_param_tensor.grad)
+            #     print(b)
             #     exit(-1)
             
                 

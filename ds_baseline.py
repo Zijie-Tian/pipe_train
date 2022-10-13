@@ -39,13 +39,6 @@ from torchmobius.utils import print_memory_usage, model_config, setup_seed, debu
 from torchtext.data.utils import get_tokenizer
 from torchtext.vocab import build_vocab_from_iterator
 
-# import wandb
-# wandb.init(project="test", entity="thu-storage")
-# # define our custom x axis metric
-# wandb.define_metric("time_step")
-# # define which metrics will be plotted against it
-# wandb.define_metric("train_loss", step_metric="time_step")
-# start_time = time.time()
 
 def init_model(model_config, dataset, config_path='./ds_config_gpt_j.json'):
     my_mpu = PipelineParallelGrid()
@@ -150,13 +143,18 @@ def train(model, train_dl, optimizer, lr_scheduler, config, epochs=1):
             # outputs = model(input_ids)
             outputs = model(sample_ids)
 
-            # loss = criterion(outputs.view(-1, config.vocab_size), tgt.view(-1))
             loss = criterion(outputs.view(-1, config.vocab_size), sample_labels.view(-1))
 
             print('| epoch {:3d} | step {:3d} | loss {:5.2f} '.format(epoch, batch_id, loss))
             model.backward(loss)
-
-            # clip_grad_norm_(model.parameters(), 0.1)
+            torch.cuda.synchronize()
+            
+            from torchmobius.utils import clip_grad_norm_, has_overflow_serial
+            if has_overflow_serial(model.parameters()):
+                print("GRADIENT OVERFLOW!")
+                continue
+            
+            clip_grad_norm_(model.parameters(), 0.1)
             model.step()
 
         lr_scheduler.step()
@@ -179,5 +177,5 @@ if __name__ == '__main__':
     
     # dl = DataLoader(dataset=train_set, batch_size=4, num_workers=1, shuffle=False)
 
-    train(model, train_dl, optimizer, lr_scheduler, CONFIG, epochs=64)
+    train(model, train_dl, optimizer, lr_scheduler, CONFIG, epochs=30)
 

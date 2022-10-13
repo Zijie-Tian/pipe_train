@@ -149,6 +149,8 @@ class MobiusPipeline:
         n = len(partitions)
 
         skip_trackers = [SkipTrackerThroughPotals(skip_layout) for _ in batches]
+        
+        torchmobius.attribute.GRADIENT_OVERFLOW = False
 
         with spawn_workers(physic_devices, 1) as (in_queues, out_queues):
             for schedule in multi_fwd_clock_cycles(m, n, 1):
