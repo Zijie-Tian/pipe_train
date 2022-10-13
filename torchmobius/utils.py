@@ -265,13 +265,60 @@ def clip_grad_norm_(parameters, max_norm, norm_type=2):
         norms = [p.grad.detach().abs().max().to(device) for p in parameters]
         total_norm = norms[0] if len(norms) == 1 else torch.max(torch.stack(norms))
     else:
+        # for p in parameters:
+        #     if torch.isinf(p.grad).any() or torch.isnan(p.grad).any():
+        #         print(f"WARNING: {p.grad} has inf or nan values")
+        # print("parameters", parameters[1].grad)
+        # print(torch.stack([torch.norm(p.grad.detach(), norm_type, dtype=torch.float32).to(device) for p in parameters]))
+
+                # raise RuntimeError('clip_grad_norm does not support sparse gradients')
+                
         total_norm = torch.norm(torch.stack([torch.norm(p.grad.detach(), norm_type, dtype=torch.float32).to(device) for p in parameters]), norm_type)
     
+    print("total_norm", total_norm)
     total_norm = total_norm.to(torch.float16)
+    print("total_norm", total_norm)
     clip_coef = max_norm / (total_norm + 1e-6)
+    print("clip_coef", clip_coef)
 
     if clip_coef < 1:
         for p in parameters:
             p.grad.detach().mul_(clip_coef.to(p.grad.device))
+            if torch.isnan(p.grad).any():
+                print("p.grad", p.grad)
+                raise RuntimeError('clip_grad_norm found NaN gradients')
+            
     return total_norm
 
+
+def _has_inf_or_nan(x, j=None):
+    try:
+            # if x is half, the .float() incurs an additional deep copy, but it's necessary if
+            # Pytorch's .sum() creates a one-element tensor of the same type as x
+            # (which is true for some recent version of pytorch).
+        cpu_sum = float(x.float().sum())
+            # More efficient version that can be used if .sum() returns a Python scalar
+            # cpu_sum = float(x.sum())
+    except RuntimeError as instance:
+            # We want to check if inst is actually an overflow exception.
+            # RuntimeError could come from a different error.
+            # If so, we still want the exception to propagate.
+        if "value cannot be converted" not in instance.args[0]:
+            raise
+        return True
+    else:
+        if cpu_sum == float('inf') or cpu_sum == -float('inf') or cpu_sum != cpu_sum:
+            return True
+        return False
+    
+def has_overflow_serial(params):
+    for p in params:
+        if p.grad is not None and _has_inf_or_nan(p.grad.data):
+            return True
+    return False
+
+def has_overflow_params(params):
+    for p in params:
+        if p is not None and _has_inf_or_nan(p.data):
+            return True
+    return False

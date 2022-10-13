@@ -84,6 +84,12 @@ def _pre_module_forward_function(module, bind_dic):
                 # FIXME inference
                 else:
                     param.mobius_tensor_attr.upload_param()
+                    
+                    # NOTE(fyy) dirty sync
+                    # assert param.mobius_tensor_attr.device_param_tensor != None
+                    # if torch.isnan(param.mobius_tensor_attr.device_param_tensor).any():
+                    #     print("device_param_tensor : ", param.mobius_tensor_attr.device_param_tensor)
+                    #     exit(-1)
 
         # for _, param in module.named_parameters(recurse=True):
         #     param.mobius_tensor_attr.wait_upload()
@@ -127,6 +133,9 @@ def _pre_module_backward_function(module, output):
                     break
                 else:
                     param.mobius_tensor_attr.upload_param()
+                    # if torch.isnan(param.mobius_tensor_attr.device_param_tensor).any():
+                    #     print("device_param_tensor : ", param.mobius_tensor_attr.device_param_tensor)
+                    #     exit(-1)
 
 
 

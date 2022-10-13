@@ -138,7 +138,7 @@ def get_gptj_pipemodel(config, nlayers, dropout=0.5):
 
     return model
 
-def get_gptj_mobiusmodel(config, nlayers, dropout=0.5, fp16=False):
+def get_gptj_mobiusmodel(config, DEVICES, nlayers, dropout=0.5, fp16=False):
     num_gpus = 8
     # partition_len = ((nlayers - 1) // num_gpus) + 1
 
@@ -161,7 +161,7 @@ def get_gptj_mobiusmodel(config, nlayers, dropout=0.5, fp16=False):
     gptj_model = GPTJForCausalLM.from_pretrained("gpt-j-6B", config=config)
     seq = nn.Sequential(*(gptj_model.to_layers()))
 
-    DEVICES = "0,1,2,3,4,5,6,7"
+    # DEVICES = "0,1,2,3"
     GPU_SIZE_RATIO = 0.44
     PARTITION_RATIO = 0.8
     PARTITION_NUM = 4
@@ -171,8 +171,8 @@ def get_gptj_mobiusmodel(config, nlayers, dropout=0.5, fp16=False):
     N_GPU = len(devices)
     tmp_devices = split_devices(devices)
 
-    sample_ids = torch.rand(64, 25)
-    sample_tgt = torch.rand(1600)
+    sample_ids = torch.rand(4, 512)
+    sample_tgt = torch.rand(4, 512)
     
     if fp16:
         seq = seq.half()

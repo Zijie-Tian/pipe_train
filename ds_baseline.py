@@ -66,14 +66,14 @@ def init_model(model_config, dataset, config_path='./ds_config_gpt_j.json'):
     lr = 5 # learning rate
     optimizer = torch.optim.SGD(model.parameters(), lr=lr)
     # optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 1.0, gamma=0.95)
+    # scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 1.0, gamma=0.95)
 
     model, optimizer, train_dataloader, lr_scheduler = deepspeed.initialize(
         model=model,
         optimizer=optimizer,
         config=config_path,
         training_data=dataset,
-        lr_scheduler=scheduler,
+        # lr_scheduler=scheduler,
         dist_init_required=False
     )
 
@@ -111,7 +111,7 @@ class WT2_Dataset2(torch.utils.data.Dataset):
 
         self.inputs = []
         self.labels = []
-        self.nbatch = 200
+        self.nbatch = 600
         for i in range(self.nbatch):
             input_ids, tgt = get_batch(train_data, i)
             self.inputs.append(input_ids)
@@ -128,9 +128,11 @@ def train(model, train_dl, optimizer, lr_scheduler, config, epochs=1):
     criterion = nn.CrossEntropyLoss()
     # num_of_batches = len(trainloader)
 
-    # for epoch in range(epochs):  # loop over the dataset multiple times
-    #     running_loss = 0.0
-    # for i, (input_ids, tgt) in enumerate(trainloader, 0):
+    sample = None
+    for batch_id, data in enumerate(train_dl):
+        sample_ids, sample_labels = data
+        break
+
     model.train()
     for epoch in tqdm.tqdm(range(epochs)):
         for batch_id, data in enumerate(train_dl):
@@ -141,21 +143,23 @@ def train(model, train_dl, optimizer, lr_scheduler, config, epochs=1):
 
             input_ids = input_ids.to(torch.cuda.current_device())
             tgt = tgt.to(torch.cuda.current_device())
-            # forward + backward + optimize
-            outputs = model(input_ids)
 
-            # print("Output Shape : ", outputs.shape)
-            # print("After View Shape : ", outputs.view(-1, config.vocab_size).shape)
-            # print("Target Shape : ", tgt.shape)
-            loss = criterion(outputs.view(-1, config.vocab_size), tgt.view(-1))
+            sample_ids = sample_ids.to(torch.cuda.current_device())
+            sample_labels = sample_labels.to(torch.cuda.current_device())
 
-            print('| epoch {:3d} | ms/batch {:5.2f} | loss {:5.2f} | ppl {:8.2f}'.format(
-                    epoch, batch_id, loss, math.exp(loss)))
+            # outputs = model(input_ids)
+            outputs = model(sample_ids)
+
+            # loss = criterion(outputs.view(-1, config.vocab_size), tgt.view(-1))
+            loss = criterion(outputs.view(-1, config.vocab_size), sample_labels.view(-1))
+
+            print('| epoch {:3d} | step {:3d} | loss {:5.2f} '.format(epoch, batch_id, loss))
             model.backward(loss)
 
-            clip_grad_norm_(model.parameters(), 0.1)
+            # clip_grad_norm_(model.parameters(), 0.1)
             model.step()
-            lr_scheduler.step()
+
+        lr_scheduler.step()
             
     # print(f'[Epoch {epoch + 1}/{epochs}] loss: {running_loss / 10:.3f}')
 
@@ -175,5 +179,5 @@ if __name__ == '__main__':
     
     # dl = DataLoader(dataset=train_set, batch_size=4, num_workers=1, shuffle=False)
 
-    train(model, train_dl, optimizer, lr_scheduler, CONFIG, epochs=1)
+    train(model, train_dl, optimizer, lr_scheduler, CONFIG, epochs=64)
 

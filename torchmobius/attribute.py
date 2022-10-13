@@ -268,8 +268,6 @@ class MobiusTensorAttribute(object):
                 self.device_tmp_param_tensor = self.device_mem.allocate_tensor(self.numel)
                 self.activation_tensor_id = id(self.device_tmp_param_tensor)
 
-                # self.start_upload_event.record()
-
                 # transfer the data from the cpu tensor
                 self.device_tmp_param_tensor.copy_(self.cpu_param_tensor.view([self.numel]), non_blocking=True)
 
@@ -280,14 +278,13 @@ class MobiusTensorAttribute(object):
                     self.numel, self.shape
                 )
 
-                # record the event
-                # self.end_upload_event.record()
-
             else:
-                # TODO add prof flag
-                # self.start_upload_event.record()
                 self.device_param_tensor.data = self.cpu_param_tensor.to(self.device, non_blocking=True).view(self.shape)
-                # self.end_upload_event.record()
+                
+            # if torch.isnan(self.device_param_tensor.data).any():
+            #     print('nan in upload')
+            #     print("device_param_tensor : ", self.device_param_tensor)
+            #     exit(-1)
 
 
             # if activation, cpu buffer should be freed
@@ -300,7 +297,6 @@ class MobiusTensorAttribute(object):
 
             # flag the position of the tensor.data
             self.position = MobiusPosistion.GPU
-        torch.cuda.nvtx.range_pop()
 
     @torch.no_grad()
     def free_fwd_param(self):
@@ -329,7 +325,16 @@ class MobiusTensorAttribute(object):
 
         with use_stream(self.offload_stream):
             # transfer grad     
+            # if not torch.isnan(self.device_param_tensor.grad).any():
             self.cpu_param_tensor.grad.copy_(self.device_param_tensor.grad, non_blocking=True)
+        
+            # if torch.isnan(self.cpu_param_tensor.grad).any() or torch.isnan(self.device_param_tensor.grad).any():
+            #     print('nan or inf in grad')
+            #     print("cpu_param_tensor ", self.cpu_param_tensor.grad)
+            #     print("device_param_tensor ", self.device_param_tensor.grad)
+            #     exit(-1)
+            
+                
 
             # set the grad to None
             # if self.device_param_tensor.grad.shape == torch.Size([50400, 4096]):

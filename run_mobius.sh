@@ -1,0 +1,1 @@
+CUDA_VISIBLE_DEVICES="0,1,4,5" python ./real_train.py

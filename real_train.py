@@ -1,3 +1,4 @@
+from symbol import parameters
 import sys
 import time
 import math
@@ -13,7 +14,7 @@ from torch.utils.data import Dataset, DataLoader
 
 from model import Encoder, Decoder, PositionalEncoding, get_gptj_gpipemodel, get_gptj_mobiusmodel, get_gptj_pipemodel
 import torchmobius
-from torchmobius.utils import setup_seed, clip_grad_norm_
+from torchmobius.utils import mobius_logger, setup_seed, clip_grad_norm_, has_overflow_serial, has_overflow_params
 
 # For Datasets !!
 from torchtext.datasets import WikiText2
@@ -45,59 +46,62 @@ if torch.cuda.device_count() < 2:
 setup_seed(2022)
 # ------------------- Attention -------------------
 
-train_iter = WikiText2(split='train')
-tokenizer = get_tokenizer('basic_english')
-vocab = build_vocab_from_iterator(map(tokenizer, train_iter), specials=["<unk>"])
-vocab.set_default_index(vocab["<unk>"]) 
-
-def data_process(raw_text_iter):
-    data = [torch.tensor(vocab(tokenizer(item)), dtype=torch.long) for item in raw_text_iter]
-    return torch.cat(tuple(filter(lambda t: t.numel() > 0, data)))
-
 train_iter, val_iter, test_iter = WikiText2()
-train_data = data_process(train_iter)
-val_data = data_process(val_iter)
-test_data = data_process(test_iter)
+
+# def encoding_data(raw_text_iter):
+#     print("Raw data : ", raw_text_iter)
+#     data = [torch.tensor(vocab(tokenizer(item)), dtype=torch.long) for item in raw_text_iter]
+#     return torch.cat(tuple(filter(lambda t: t.numel() > 0, data)))
 
 def batchify(data, bsz):
-    device = torch.device("cuda:0")
-    # Divide the dataset into bsz parts.
     nbatch = data.size(0) // bsz
-    # Trim off any extra elements that wouldn't cleanly fit (remainders).
     data = data.narrow(0, 0, nbatch * bsz)
-    # Evenly divide the data across the bsz batches.
     data = data.view(bsz, -1).t().contiguous()
-    return data.to(device)
+    return data
 
-batch_size = 4
-eval_batch_size = 1
-train_data = batchify(train_data, batch_size)
-val_data = batchify(val_data, eval_batch_size)
-test_data = batchify(test_data, eval_batch_size)
-
-bptt = 512
 def get_batch(source, i):
+    bptt = 512
     seq_len = min(bptt, len(source) - 1 - i)
-    data = source[i:i+seq_len]
+    data = source[i:i+seq_len].view(-1)
     target = source[i+1:i+1+seq_len].view(-1)
     # Need batch dimension first for pipeline parallelism.
-    return data.t(), target
+    return data, target
 
 class WT2_Dataset2(torch.utils.data.Dataset):
     def __init__(self, data, bsz, bptt):
-        # self.data = batchify(encoding_data(data), 1024)
-        # Here the data is a sequence of encoded text.
-        # Pretend to have a batch dimension.
-        _train_data = data_process(data)
-        train_data = batchify(_train_data, bsz)
+        self.bppt = bptt
+        self.tokenizer = get_tokenizer('basic_english')
+        self.vocab = build_vocab_from_iterator(map(self.tokenizer, train_iter), specials=["<unk>"])
+        self.vocab.set_default_index(self.vocab["<unk>"]) 
+
+        _train_data = self.encoding_data(data)
+        train_data = self.batchify(_train_data, bsz)
 
         self.inputs = []
         self.labels = []
-        self.nbatch = 200
+        self.nbatch = 600
         for i in range(self.nbatch):
-            input_ids, tgt = get_batch(train_data, i)
+            input_ids, tgt = self.get_batch(train_data, i)
             self.inputs.append(input_ids)
             self.labels.append(tgt)
+
+    def encoding_data(self, raw_text_iter):
+        data = [torch.tensor(self.vocab(self.tokenizer(item)), dtype=torch.long) for item in raw_text_iter]
+        return torch.cat(tuple(filter(lambda t: t.numel() > 0, data)))
+
+    def batchify(self, data, bsz):
+        nbatch = data.size(0) // bsz
+        data = data.narrow(0, 0, nbatch * bsz)
+        data = data.view(bsz, -1).t().contiguous()
+        return data
+
+    def get_batch(self, source, i):
+        # bptt = 512
+        seq_len = min(self.bppt, len(source) - 1 - i)
+        data = source[i:i+seq_len].view(-1)
+        target = source[i+1:i+1+seq_len].view(-1)
+        # Need batch dimension first for pipeline parallelism.
+        return data, target
 
     def __len__(self):
         return self.nbatch
@@ -105,54 +109,59 @@ class WT2_Dataset2(torch.utils.data.Dataset):
     def __getitem__(self, idx): 
         return self.inputs[idx], self.labels[idx]
 
-def train_step(model, train_dl, start_step, optimizer, criterion, scheduler, num_gpus=8, epoch=1, log_interval = 1, fp16=False):
-    model.train() # Turn on the train mode
+def train_step(model, train_dl, start_step, optimizer, criterion, scheduler, epoch=1, log_interval = 1, fp16=False):
+    # model.train() # Turn on the train mode
     total_loss = 0.
     start_time = time.time()
-    ntokens = len(vocab)
+    # ntokens = len(vocab)
 
     # Train only for 50 batches to keep script execution time low.
-    nbatches = min(50 * bptt, train_data.size(0) - 1)
+    # nbatches = min(50 * bptt, train_data.size(0) - 1)
 
-    step = start_step
-    # for batch_id, i in enumerate(range(0, nbatches, bptt)):
+    sample = None
     for batch_id, data in enumerate(train_dl):
-        step = step + 1
-        data, targets = get_batch(train_data, i)
-        # print("Data shape: ", data.shape)
-        # print("Targets shape: ", targets.shape)
+        sample_ids, sample_labels = data
+        break
+
+    # for batch_id, i in enumerate(range(0, nbatches, bptt)):
+    for batch_id, rawdata in enumerate(train_dl):
+        ids, targets = rawdata
+        # data, targets = get_batch(train_data, i)
+        # print("Data shape: ", sample_ids.shape)
+        # print("Targets shape: ", sample_labels.shape)
         if fp16:
             # ------------------- Step --------------------
-            # output = model(data).local_value().cuda(num_gpus - 1)
-            output = model(data)
-            # Need to move targets to the device where the output of the
-            # pipeline resides.
-            # ----------------------------------------------
-            # print("Output Shape : ", output.shape)
-            # print("After View Shape : ", output.view(-1, config.vocab_size).shape)
-            # print("Target Shape : ", targets.shape)
-            loss = criterion(output.view(-1, config.vocab_size), targets.cuda(output.device))
+            # output = model(data)
+            optimizer.zero_grad()
+            output = model(sample_ids.to(model.get_first_device()))
+
+            loss = criterion(output.view(-1, config.vocab_size), sample_labels.view(-1).cuda(output.device))
+            mobius_logger(f"Loss : {loss.item()} ")
             loss.backward()
             
-            # fyy's advice
             torch.cuda.synchronize()
+            if has_overflow_serial(model.parameters()):
+                mobius_logger("OVERFLOW!")
+                continue
             
-            # print(model.parameters()[321].grad)
-            clip_grad_norm_(model.parameters(), 0.1)
+            # clip_grad_norm_(model.parameters(), 0.01)
+            # 
+            # if has_overflow_params(model.parameters()):
+            #     mobius_logger("OVERFLOW before update")
             
-            # torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)      
-                  
-            optimizer.step()
-            optimizer.zero_grad()
+            # optimizer.step()
             
+            # if has_overflow_params(model.parameters()):
+            #     mobius_logger("OVERFLOW after update")
+
         else:
+            assert False, "Not implemented yet"
             # ------------------- Step --------------------
-            # output = model(data).local_value().cuda(num_gpus - 1)
-            output = model(data)
-            # Need to move targets to the device where the output of the
-            # pipeline resides.
-            print(targets.shape)
-            loss = criterion(output.view(-1, config.vocab_size), targets.to(output.device))
+            # output = model(data)
+            output = model(sample_ids)
+
+            # loss = criterion(output.view(-1, config.vocab_size), targets.cuda(output.device))
+            loss = criterion(output.view(-1, config.vocab_size), sample_labels.cuda(output.device))
             loss.backward()
             
             # fyy's advice
@@ -165,49 +174,14 @@ def train_step(model, train_dl, start_step, optimizer, criterion, scheduler, num
             optimizer.step()
             optimizer.zero_grad()
             # ----------------------------------------------
-
-        # print(loss)
         log_dict = {
             "train_loss": loss,
-            "time_step": step,
         }
         wandb.log(log_dict)
-        print('| epoch {:3d} | ms/batch {:5.2f} | loss {:5.2f} | ppl {:8.2f}'.format(
-                    epoch, batch_id, loss, math.exp(loss)))
-
-        # total_loss += loss.item()
-        # if batch_id % log_interval == 0 and batch > 0:
-        #     cur_loss = total_loss / log_interval
-        #     elapsed = time.time() - start_time
-        #     print('| epoch {:3d} | {:5d}/{:5d} batches | '
-        #           'lr {:02.2f} | ms/batch {:5.2f} | '
-        #           'loss {:5.2f} | ppl {:8.2f}'.format(
-        #             epoch, batch, nbatches // bptt, scheduler.get_lr()[0],
-        #             elapsed * 1000 / log_interval,
-        #             cur_loss, math.exp(cur_loss)))
-        #     total_loss = 0
-        #     start_time = time.time()
-        print('lr {} | loss {:5.2f}'.format(scheduler.get_lr()[0], loss.item()))
-        break
+        mobius_logger('| epoch {:3d} | step {:3d} | loss {:5.2f} '.format(epoch, batch_id, loss))
+        # break
 
     return step
-                        
-def evaluate(eval_model, config, data_source, criterion, num_gpus=8):
-    eval_model.eval() # Turn on the evaluation mode
-    total_loss = 0.
-    # ntokens = len(vocab)
-    # Evaluate only for 50 batches to keep script execution time low.
-    nbatches = min(50 * bptt, data_source.size(0) - 1)
-    with torch.no_grad():
-        for i in range(0, nbatches, bptt):
-            data, targets = get_batch(data_source, i)
-            # output = eval_model(data).local_value().cuda(num_gpus - 1)
-            output = eval_model(data).cuda(num_gpus - 1)
-            output_flat = output.view(-1, config.vocab_size)
-            # Need to move targets to the device where the output of the
-            # pipeline resides.
-            total_loss += len(data) * criterion(output_flat, targets.cuda(num_gpus - 1)).item()
-    return total_loss / (len(data_source) - 1)
 
 if __name__ == '__main__':
     # -----------------------------------------------------
@@ -228,7 +202,6 @@ if __name__ == '__main__':
             _channels=["cuda_ipc", "cuda_basic"],
         )
     )
-    tokenizer = AutoTokenizer.from_pretrained("EleutherAI/gpt-j-6B")
     config = GPTJConfig.from_pretrained('EleutherAI/gpt-j-6B')
 
     # ntokens = len(vocab) # the size of vocabulary
@@ -239,24 +212,32 @@ if __name__ == '__main__':
     # dropout = 0.2 # the dropout value
 
     FP16_mode = True
+    DEVICES = "0,1,2,3"
     # Build the pipeline.
     # model = get_gptj_pipemodel(config, 32)
-    model = get_gptj_mobiusmodel(config, 32, fp16=FP16_mode)
+    model = get_gptj_mobiusmodel(config, DEVICES, 32, fp16=FP16_mode)
     # model = get_gptj_gpipemodel(config, 32, fp16=FP16_mode)
 
     criterion = nn.CrossEntropyLoss()
     lr = 5 # learning rate
-    optimizer = torch.optim.SGD(model.parameters(), lr=lr)
-    # optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    # scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, 1.0, gamma=0.95)
+    data_len = 200 # The number of batches
+    batch_size = 4 # batch size
+
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.001, weight_decay=3e-7)
 
     best_val_loss = float("inf")
     epochs = 64 # The number of epochs
-    scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=0.1, steps_per_epoch=train_data.size(0) // batch_size, epochs=epochs)
-    best_model = None
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=0.1, steps_per_epoch=data_len // batch_size, epochs=epochs)
 
     train_set = WT2_Dataset2(train_iter, 1, 512)
     train_dl = DataLoader(dataset=train_set, batch_size=4, num_workers=1, shuffle=False)
+
+    # for data in train_dl:
+    #     sample_ids, sample_labels = data
+    #     print(sample_ids.shape)
+    #     print(sample_labels.shape)
+    #     print(data)
+    #     break
 
     start_time = time.time()
     step = 0
