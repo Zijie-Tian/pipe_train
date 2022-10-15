@@ -270,8 +270,7 @@ class Checkpoint(torch.autograd.Function):
         ctx.recomputed = recomputed
         ctx.rng_states = rng_states
 
-        for _ in range(microbatch_parallelism):
-            save_rng_states(input[0].device, ctx.rng_states)
+        save_rng_states(input[0].device, ctx.rng_states)
             
         # ctx.save_for_backward(*input)
 
@@ -327,22 +326,19 @@ class Recompute(torch.autograd.Function):
 
         ctx.function = function
         ctx.input_atomic = input_atomic
-        
-        ctx.microbatch_parallelism = microbatch_parallelism
-        ctx.count = 0
                 
         ctx.save_for_backward(*input)
 
         #NOTE(Mobius) flush the input to DRAM
-        if bind_module != None:
-            if type(input) is tuple:
-                for i in input:
-                    bind_module.mobius_module_attr.bind_and_free_activation(
-                        activation=i,
-                        transfer_time=transfer_time,
-                        upload_stream=upload_streams_dic[input[0].device],
-                        offload_stream=offload_streams_dic[input[0].device],
-                    )
+        # if bind_module != None:
+        #     if type(input) is tuple:
+        #         for i in input:
+        #             bind_module.mobius_module_attr.bind_and_free_activation(
+        #                 activation=i,
+        #                 transfer_time=transfer_time,
+        #                 upload_stream=upload_streams_dic[input[0].device],
+        #                 offload_stream=offload_streams_dic[input[0].device],
+        #             )
 
         return phony
 
@@ -350,37 +346,30 @@ class Recompute(torch.autograd.Function):
     def backward(ctx: Context, *grad_output: Tensor) -> Tuple[None, ...]:  # pragma: no cover
         input = ctx.saved_tensors
 
-        if ctx.count == 0:
-            #NOTE(Mobius) sync the async transfering       
-            for i in input:
-                if hasattr(i, 'mobius_tensor_attr'):
-                    i.mobius_tensor_attr.start_compute()
+        # NOTE(Mobius) free activation
+        # for i in input:
+        #     if hasattr(i, 'mobius_tensor_attr'):
+        #         while True:
+        #             if i.mobius_tensor_attr.get_position() == MobiusPosistion.GPU:
+        #                 # # NOTE(fyy) dirty sync
+        #                 if torch.isnan(i.mobius_tensor_attr.device_param_tensor.data).any():
+        #                     print('nan in backward')
+        #                 break
+        
+        input_leaf = tuple(x.detach().requires_grad_(x.requires_grad) for x in input)
 
-            for i in input:
-                if hasattr(i, 'mobius_tensor_attr'):
-                    while True:
-                        if i.mobius_tensor_attr.get_position() == MobiusPosistion.GPU:
-                            break
-                    i.mobius_tensor_attr.wait_upload()
-            
-            
-            input_leaf = tuple(x.detach().requires_grad_(x.requires_grad) for x in input)
+        with restore_rng_states(input[0].device, ctx.rng_states):
+            with torch.enable_grad(), enable_recomputing():
+                output = ctx.function(input_leaf[0] if ctx.input_atomic else input_leaf)
 
-            with restore_rng_states(input[0].device, ctx.rng_states):
-                with torch.enable_grad(), enable_recomputing():
-                    output = ctx.function(input_leaf[0] if ctx.input_atomic else input_leaf)
+        ctx.recomputed.append((output, input_leaf))
 
-            for i in range(ctx.microbatch_parallelism):
-                ctx.recomputed.append((output, input_leaf))
-
-            ctx.count += 1
-            
-            #NOTE(Mobius) free activation
-            if ctx.count == ctx.microbatch_parallelism:
-                for i in input:
-                    if hasattr(i, 'mobius_tensor_attr'):
-                        i.mobius_tensor_attr.free_param()
-                        del i
+        
+        #NOTE(Mobius) free activation
+        # for i in input:
+        #     if hasattr(i, 'mobius_tensor_attr'):
+        #         i.mobius_tensor_attr.free_param()
+        #         del i
 
         
                 

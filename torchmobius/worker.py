@@ -9,8 +9,8 @@ from typing import (TYPE_CHECKING, Callable, Dict, Generator, List, Optional, Tu
 
 import torch
 
-from torchmobius.microbatch import Batch
-from torchmobius.stream import AbstractStream, use_device, use_stream
+from torchgpipe.microbatch import Batch
+from torchgpipe.stream import AbstractStream, use_device, use_stream
 
 __all__: List[str] = []
 
@@ -53,11 +53,8 @@ class Task:
         self._finalize = finalize
 
     def compute(self) -> Batch:
-        torch.cuda.nvtx.range_push('compute')
         with use_stream(self.stream):
-            rc = self._compute()
-        torch.cuda.nvtx.range_pop()
-        return rc
+            return self._compute()
 
     def finalize(self, batch: Batch) -> None:
         if self._finalize is None:
@@ -93,14 +90,16 @@ def worker(in_queue: InQueue,
     done = (False, None)
     out_queue.put(done)
 
+
 @contextmanager
-def spawn_workers(devices: List[torch.device], step: int=1) -> Generator[Tuple[List[List[InQueue]], List[List[OutQueue]]], None, None]:
+def spawn_workers(devices: List[torch.device],
+                  ) -> Generator[Tuple[List[InQueue], List[OutQueue]], None, None]:
     """Spawns worker threads. A worker thread is bound to a device."""
     in_queues: List[InQueue] = []
     out_queues: List[OutQueue] = []
 
     # Spawn workers.
-    workers: Dict[torch.device, List[Tuple[InQueue, OutQueue]]] = {}
+    workers: Dict[torch.device, Tuple[InQueue, OutQueue]] = {}
 
     def normalize_device(device: torch.device) -> torch.device:
         if device.type == 'cuda' and device.index is None:
@@ -117,24 +116,16 @@ def spawn_workers(devices: List[torch.device], step: int=1) -> Generator[Tuple[L
         try:
             in_queue, out_queue = workers[device]
         except KeyError:
-            in_queue = []
-            out_queue = []
-            for i in range(step):
-                in_q = Queue()
-                out_q = Queue()
-                
-                in_queue.append(in_q)
-                out_queue.append(out_q)
-                if device not in workers.keys():
-                    workers[device] = []
-                workers[device].append((in_q, out_q))
+            in_queue = Queue()
+            out_queue = Queue()
+            workers[device] = (in_queue, out_queue)
 
-                t = Thread(
-                    target=worker,
-                    args=(in_q, out_q, device, torch.is_grad_enabled()),
-                    daemon=True,
-                )
-                t.start()
+            t = Thread(
+                target=worker,
+                args=(in_queue, out_queue, device, torch.is_grad_enabled()),
+                daemon=True,
+            )
+            t.start()
 
         in_queues.append(in_queue)
         out_queues.append(out_queue)
@@ -143,21 +134,17 @@ def spawn_workers(devices: List[torch.device], step: int=1) -> Generator[Tuple[L
         yield (in_queues, out_queues)
     finally:
         # Close workers.
-        for in_queue in in_queues:
-            for in_q in set(in_queue):
-                in_q.put(None)
+        for in_queue in set(in_queues):
+            in_queue.put(None)
 
         # Join running workers.
-        for out_queue in out_queues:
-            running = set(out_queue)
+        running = set(out_queues)
+        while running:
+            out_queue = running.pop()
+            ok, payload = out_queue.get()
 
-            while running:
-                out_q = running.pop()
-                ok, payload = out_q.get()
+            done = (False, None)
+            if (ok, payload) == done:
+                continue
 
-                done = (False, None)
-                if (ok, payload) == done:
-                    continue
-
-                running.add(out_q)
-        
+            running.add(out_queue)

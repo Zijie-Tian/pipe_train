@@ -21,15 +21,10 @@ import deepspeed.runtime
 
 import wandb
 
-epochs      =   15  # The number of epochs
-bsz         =   8   # Batch size for training
-
 WANDB = True
 
 if WANDB:
-    wandb.init(project="test", entity="thu-storage",
-    config={"epochs": epochs, "batch_size": bsz},
-    )
+    wandb.init(project="test", entity="thu-storage")
     # wandb.define_metric("train_loss", step_metric="time_step")
 start_time = time.time()
 
@@ -43,7 +38,7 @@ train_iter, val_iter, test_iter = WikiText2()
 
 class WT2_Dataset2(torch.utils.data.Dataset):
     def __init__(self, data, bsz, bptt):
-        self.bptt = bptt
+        self.bppt = bptt
         self.tokenizer = get_tokenizer('basic_english')
         self.vocab = build_vocab_from_iterator(map(self.tokenizer, train_iter), specials=["<unk>"])
         self.vocab.set_default_index(self.vocab["<unk>"]) 
@@ -53,9 +48,7 @@ class WT2_Dataset2(torch.utils.data.Dataset):
 
         self.inputs = []
         self.labels = []
-        self.nbatch = 1200
-        print("train data size: ", train_data.size())
-        print("raw data size: ", _train_data.size())
+        self.nbatch = 600
         for i in range(self.nbatch):
             input_ids, tgt = self.get_batch(train_data, i)
             self.inputs.append(input_ids)
@@ -72,7 +65,7 @@ class WT2_Dataset2(torch.utils.data.Dataset):
         return data
 
     def get_batch(self, source, i):
-        seq_len = min(self.bptt, len(source) - 1 - i)
+        seq_len = min(self.bppt, len(source) - 1 - i)
         data = source[i:i+seq_len].view(-1)
         target = source[i+1:i+1+seq_len].view(-1)
         return data, target
@@ -95,17 +88,15 @@ def train(model, train_dl, optimizer, criterion, scheduler, epochs=1, log_interv
             sample_ids, sample_labels = data
             
             optimizer.zero_grad()
-            
             output = model(sample_ids.to("cuda:0"))
             torch.cuda.synchronize()
-            
             loss = criterion(output.view(-1, config.vocab_size).float(), sample_labels.view(-1).cuda(output.device))
-            
             loss.backward()
             torch.cuda.synchronize()
             
+            # print(torch.isnan(output).any())
             mobius_logger('| epoch {:3d} | step {:3d} | loss {:5.2f} '.format(epoch, batch_id, loss))
-                                            
+                                    
             if fp16 and has_overflow_serial(model.parameters()):
                 mobius_logger("GRADIENT OVERFLOW!")
                 continue
@@ -115,32 +106,37 @@ def train(model, train_dl, optimizer, criterion, scheduler, epochs=1, log_interv
                 # A parameter for DeepSpeedCPUAdam.
                 # fp16_param_groups=model.parameters()]
             
+            
             if fp16:
                 import time
-                # A synchronization point for the CUDA stream.
-                # torch.cuda.synchronize()
+                torch.cuda.synchronize()
                 # clip_grad_norm_(model.parameters(), 0.1)
                 optimizer.step()
-                # torch.cuda.synchronize()
                 # optimizer.step(fp16_param_groups=model.parameters())
             else:
                 optimizer.step()
-            
-            scheduler.step()
 
             log_dict = {
                 "train_loss": loss,
-                "learning_rate": scheduler.get_last_lr()[0],
             }
             if WANDB:
                 wandb.log(log_dict)
             
+            scheduler.step()
+            log_dict2 = {
+                "learning_rate": scheduler.get_last_lr()[0],
+            }
+            if WANDB:
+                wandb.log(log_dict2)
+
 
 if __name__ == '__main__':
+    
     FP16_mode   = True
     DEVICES     = "0,1,4,5"
+    epochs      = 30 # The number of epochs
     
-    config      = GPTJConfig.from_pretrained('gpt-j-6B')
+    config      = GPTJConfig.from_pretrained('EleutherAI/gpt-j-6B')
 
     # Build the pipeline.
     model = get_gptj_mobiusmodel(config, DEVICES, nlayers=-1, fp16=FP16_mode)
@@ -161,6 +157,6 @@ if __name__ == '__main__':
         )
 
     train_set = WT2_Dataset2(train_iter, 1, 512)
-    train_dl = DataLoader(dataset=train_set, batch_size=bsz, num_workers=1, shuffle=False)
+    train_dl = DataLoader(dataset=train_set, batch_size=8, num_workers=1, shuffle=False)
     
     train(model, train_dl, optimizer, criterion, scheduler, epochs=epochs, fp16=FP16_mode)

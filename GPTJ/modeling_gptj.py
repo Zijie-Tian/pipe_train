@@ -14,6 +14,7 @@
 # limitations under the License.
 """ PyTorch GPT-J model."""
 
+from turtle import forward
 from typing import Optional, Tuple, Union
 
 import torch
@@ -719,6 +720,17 @@ class GPTJModel(GPTJPreTrainedModel):
         )
 
 
+class Output(nn.Module):
+    def __init__(self, lm_head):
+        super().__init__()
+        
+        self.lm_head = lm_head
+        
+    def forward(self, hidden_states):
+        lm_logits = self.lm_head(hidden_states).to(torch.float32)
+        return lm_logits
+
+
 @add_start_docstrings(
     """
     The GPT-J Model transformer with a language modeling head on top.
@@ -743,7 +755,7 @@ class GPTJForCausalLM(GPTJPreTrainedModel):
     def to_layers(self):
         # _layers = [self.lm_head]
         _layers = self.transformer.to_layers()
-        _layers.append(self.lm_head)
+        _layers.append(Output(self.lm_head))
         return _layers
 
     @add_start_docstrings(PARALLELIZE_DOCSTRING)

@@ -22,6 +22,7 @@ from transformers import GPT2Config, GPT2Tokenizer, GPT2Model
 from gpt import get_GPT_model, get_GPTLayers
 
 import deepspeed
+import deepspeed.runtime.utils as ds_utils
 from deepspeed.pipe import PipelineModule
 from deepspeed.utils import RepeatingLoader
 

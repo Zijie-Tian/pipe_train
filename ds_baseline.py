@@ -22,51 +22,53 @@ import subprocess
 import argparse
 
 import deepspeed
+import deepspeed.runtime.utils as ds_utils
 from deepspeed.ops.adam import DeepSpeedCPUAdam # teh optimizer of ds 
 from deepspeed.runtime.pipe import ProcessTopology
 from deepspeed.runtime.pipe.topology import PipelineParallelGrid
 
 # model
 from transformers import GPT2Config, GPT2Tokenizer, GPT2Model
-from transformers import GPTJConfig, GPTJForCausalLM
+from transformers import GPTJConfig
 
 from torchtext.datasets import WikiText2
 import pandas as pd
 from GPTJ.modeling_gptj import GPTJForCausalLM
+# from transformers import GPTJForCausalLM
 
 from torchmobius.utils import print_memory_usage, model_config, setup_seed, debug_condition, clip_grad_norm_
 
 from torchtext.data.utils import get_tokenizer
 from torchtext.vocab import build_vocab_from_iterator
 
+my_mpu = None
 
 def init_model(model_config, dataset, config_path='./ds_config_gpt_j.json'):
     my_mpu = PipelineParallelGrid()
-    with deepspeed.zero.Init(#data_parallel_group=1,#my_mpu.get_data_parallel_group(),
-                            mpu=my_mpu,
-                            remote_device='cpu', # initial device to store weights
-                            enabled=True, # if F, this context has no effect
-                            pin_memory=True, # potentially increase performance
-                            config_dict_or_path=config_path):
-
-        # ------------------ model ------------------
-        # Remember this 32.
-        model_list = GPTJForCausalLM(model_config)
-        model = nn.Sequential(*model_list.to_layers())
-        # ---------------------------
+    
+    model = GPTJForCausalLM.from_pretrained("gpt-j-6B", config=model_config)
+    model = nn.Sequential(*(model.to_layers()))
+    model = model.half()
+    
+    deepspeed.zero.Init(module=model,
+                        mpu=my_mpu,
+                        remote_device='cpu', # initial device to store weights
+                        enabled=True, # if F, this context has no effect
+                        pin_memory=True, # potentially increase performance
+                        config_dict_or_path=config_path)
     
     # optimizer = DeepSpeedCPUAdam(model.parameters())
-    lr = 5 # learning rate
-    optimizer = torch.optim.SGD(model.parameters(), lr=lr)
+    # lr = 5 # learning rate
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.001, weight_decay=3e-7)
     # optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    # scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 1.0, gamma=0.95)
+    scheduler = deepspeed.runtime.lr_schedules.OneCycle(optimizer, cycle_min_lr=0.0005, cycle_max_lr=0.1)
 
     model, optimizer, train_dataloader, lr_scheduler = deepspeed.initialize(
         model=model,
         optimizer=optimizer,
         config=config_path,
         training_data=dataset,
-        # lr_scheduler=scheduler,
+        lr_scheduler=scheduler,
         dist_init_required=False
     )
 
@@ -116,57 +118,42 @@ class WT2_Dataset2(torch.utils.data.Dataset):
     def __getitem__(self, idx): 
         return self.inputs[idx], self.labels[idx]
 
-def train(model, train_dl, optimizer, lr_scheduler, config, epochs=1):
+def train(model, train_dl, optimizer, lr_scheduler, config, criterion, epochs=1):
     print("Start training...")
-    criterion = nn.CrossEntropyLoss()
+    # criterion = nn.CrossEntropyLoss()
     # num_of_batches = len(trainloader)
 
-    sample = None
-    for batch_id, data in enumerate(train_dl):
-        sample_ids, sample_labels = data
-        break
+    # for batch_id, data in enumerate(train_dl):
+    #     input_ids, tgt = data
+    #     break
 
     model.train()
     for epoch in tqdm.tqdm(range(epochs)):
         for batch_id, data in enumerate(train_dl):
             input_ids, tgt = data
-            # input_ids, tgt = get_batch(train_data, i)
-            # print("Input_ids shape: ", input_ids.shape)
-            # print("Tgt shape : ", tgt.shape)
 
             input_ids = input_ids.to(torch.cuda.current_device())
             tgt = tgt.to(torch.cuda.current_device())
 
-            sample_ids = sample_ids.to(torch.cuda.current_device())
-            sample_labels = sample_labels.to(torch.cuda.current_device())
-
-            # outputs = model(input_ids)
-            outputs = model(sample_ids)
-
-            loss = criterion(outputs.view(-1, config.vocab_size), sample_labels.view(-1))
-
+            outputs = model(input_ids)
+            torch.cuda.synchronize()
+            loss = criterion(outputs.view(-1, config.vocab_size), tgt.view(-1))
+            
             print('| epoch {:3d} | step {:3d} | loss {:5.2f} '.format(epoch, batch_id, loss))
+            
             model.backward(loss)
             torch.cuda.synchronize()
             
-            from torchmobius.utils import clip_grad_norm_, has_overflow_serial
-            if has_overflow_serial(model.parameters()):
-                print("GRADIENT OVERFLOW!")
-                continue
+            # ds_utils.clip_grad_norm_(model.parameters(), max_norm=0.1, mpu=my_mpu)
             
-            clip_grad_norm_(model.parameters(), 0.1)
             model.step()
-
-        lr_scheduler.step()
             
-    # print(f'[Epoch {epoch + 1}/{epochs}] loss: {running_loss / 10:.3f}')
+            lr_scheduler.step()
 
     print('Finished Training')
 
 if __name__ == '__main__':
     setup_seed(2021)
-
-    MODEL_NAME = "EleutherAI/gpt-j-6B"
     deepspeed.init_distributed(verbose=False)
 
     train_iter = WikiText2(split='train')
@@ -174,8 +161,8 @@ if __name__ == '__main__':
 
     CONFIG = GPTJConfig.from_pretrained('gpt-j-6B')
     model, optimizer, train_dl, lr_scheduler = init_model(CONFIG, dataset)
-    
-    # dl = DataLoader(dataset=train_set, batch_size=4, num_workers=1, shuffle=False)
 
-    train(model, train_dl, optimizer, lr_scheduler, CONFIG, epochs=30)
+    criterion = nn.CrossEntropyLoss()
+    
+    train(model, train_dl, optimizer, lr_scheduler, CONFIG, criterion, epochs=30)
 

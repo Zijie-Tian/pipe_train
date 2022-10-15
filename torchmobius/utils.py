@@ -292,24 +292,24 @@ def clip_grad_norm_(parameters, max_norm, norm_type=2):
 
 
 def _has_inf_or_nan(x, j=None):
-    try:
-            # if x is half, the .float() incurs an additional deep copy, but it's necessary if
-            # Pytorch's .sum() creates a one-element tensor of the same type as x
-            # (which is true for some recent version of pytorch).
-        cpu_sum = float(x.float().sum())
-            # More efficient version that can be used if .sum() returns a Python scalar
-            # cpu_sum = float(x.sum())
-    except RuntimeError as instance:
-            # We want to check if inst is actually an overflow exception.
-            # RuntimeError could come from a different error.
-            # If so, we still want the exception to propagate.
-        if "value cannot be converted" not in instance.args[0]:
-            raise
-        return True
-    else:
-        if cpu_sum == float('inf') or cpu_sum == -float('inf') or cpu_sum != cpu_sum:
-            return True
-        return False
+    # try:
+    #         # if x is half, the .float() incurs an additional deep copy, but it's necessary if
+    #         # Pytorch's .sum() creates a one-element tensor of the same type as x
+    #         # (which is true for some recent version of pytorch).
+    #     cpu_sum = float(x.float().sum())
+    #         # More efficient version that can be used if .sum() returns a Python scalar
+    #         # cpu_sum = float(x.sum())
+    # except RuntimeError as instance:
+    #         # We want to check if inst is actually an overflow exception.
+    #         # RuntimeError could come from a different error.
+    #         # If so, we still want the exception to propagate.
+    #     if "value cannot be converted" not in instance.args[0]:
+    #         raise
+    #     return True
+    # else:
+    #     if cpu_sum == float('inf') or cpu_sum == -float('inf') or cpu_sum != cpu_sum:
+    #         return True
+    #     return False
     
     if torch.isnan(x).any() or torch.isinf(x).any():
         return True
@@ -317,8 +317,10 @@ def _has_inf_or_nan(x, j=None):
     
 def has_overflow_serial(params):
     for p in params:
-        if p.grad is not None and _has_inf_or_nan(p.grad.data):
+        if hasattr(p, 'gradient_overflow') and p.gradient_overflow == True:
             return True
+        # if p.grad is not None and _has_inf_or_nan(p.grad.data):
+        #     return True
     return False
 
 def has_overflow_params(params):

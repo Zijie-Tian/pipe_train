@@ -82,23 +82,13 @@ def _pre_module_forward_function(module, bind_dic):
                 if param.mobius_tensor_attr.get_position() == MobiusPosistion.GPU:
                     # NOTE(fyy) dirty sync
                     if torch.isnan(param.mobius_tensor_attr.device_param_tensor.data).any():
-                        print('nan in upload')
-                        exit(-1)
+                        print('nan in _pre_module_forward_function')
+                        continue
                     break
                 # FIXME inference
                 else:
                     param.mobius_tensor_attr.upload_param()
-                
-                    # if torch.isnan(param.mobius_tensor_attr.device_param_tensor).any():
-                    #     print("device_param_tensor : ", param.mobius_tensor_attr.device_param_tensor)
-                    #     exit(-1)
-
-        # for _, param in module.named_parameters(recurse=True):
-        #     param.mobius_tensor_attr.wait_upload()
-
-    # # step1. start transferring the future param
-    # if FORWARD_FLAG:
-    #     module.mobius_module_attr.transfer_fwd_future_param()
+            
         
     
 @torch.no_grad()
@@ -115,7 +105,7 @@ def _post_module_forward_function(module, inputs, outputs, bind_dic):
     
     
 @torch.no_grad()
-def _pre_module_backward_function(module, output):       
+def _pre_module_backward_function(module, output):        
     # step1. start transfering the future param and activation
     if not NO_PREFTECH:
         module.mobius_module_attr.transfer_bwd_future_param()
@@ -133,15 +123,12 @@ def _pre_module_backward_function(module, output):
             while True:
                 if param.mobius_tensor_attr.get_position() == MobiusPosistion.GPU:
                     if torch.isnan(param.mobius_tensor_attr.device_param_tensor.data).any():
-                        print('nan in upload')
-                        exit(-1)
+                        print('nan in _pre_module_backward_function')
+                        continue
                     break
                 else:
                     param.mobius_tensor_attr.upload_param()
                     
-                    # if torch.isnan(param.mobius_tensor_attr.device_param_tensor).any():
-                    #     print("device_param_tensor : ", param.mobius_tensor_attr.device_param_tensor)
-                    #     exit(-1)
 
 
 

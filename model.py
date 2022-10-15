@@ -138,38 +138,37 @@ def get_gptj_pipemodel(config, nlayers, dropout=0.5):
 
     return model
 
-def get_gptj_mobiusmodel(config, DEVICES, nlayers, dropout=0.5, fp16=False):
-    num_gpus = 8
-    # partition_len = ((nlayers - 1) // num_gpus) + 1
+def get_gptj_mobiusmodel(config, DEVICES, nlayers=-1, dropout=0.5, fp16=False):
+    devices = [int(dev) for dev in DEVICES.split(',')]
+    N_GPU = len(devices)
+    tmp_devices = split_devices(devices)
+    num_gpus = N_GPU
 
-    # module_list = [nn.Embedding(config.vocab_size, config.n_embd)]
-    # module_list.append(nn.LayerNorm(config.n_embd, eps=config.layer_norm_epsilon))
+    if nlayers != -1:
+        # tmp_list = [nn.Embedding(config.vocab_size, config.n_embd)]
+        # tmp_list.append(nn.LayerNorm(config.n_embd, eps=config.layer_norm_epsilon))
 
-    # for i in range(nlayers):
-    #     block = GPTJBlock(config=config)
-    #     # Let Mobius decide the placement.
-    #     module_list.append(block)
-    #     # if i != 0 and i % (partition_len) == 0:
-    #     #     module_list.append(nn.Sequential(*tmp_list))
-    #     #     tmp_list = []
-    #     # device = i // (partition_len)
-    #     # tmp_list.append(block.to(device))
-    
-    # module_list.append(nn.Linear(config.n_embd, config.vocab_size))
-    # seq = nn.Sequential(*module_list)
+        # for i in range(nlayers):
+        #     block = GPTJBlock(config=config)
+        #     tmp_list.append(block)
+        
+        # tmp_list.append(nn.Linear(config.n_embd, config.vocab_size))
+        # seq = torch.nn.Sequential(*tmp_list)
+        
+        gptj_model = GPTJForCausalLM(config)
+        seq = nn.Sequential(*(gptj_model.to_layers()))
+        
+    else:
+        # pretrain model
+        gptj_model = GPTJForCausalLM.from_pretrained("gpt-j-6B", config=config)
+        seq = nn.Sequential(*(gptj_model.to_layers()))
 
-    gptj_model = GPTJForCausalLM.from_pretrained("gpt-j-6B", config=config)
-    seq = nn.Sequential(*(gptj_model.to_layers()))
 
-    # DEVICES = "0,1,2,3"
+    # Mobius configuration
     GPU_SIZE_RATIO = 0.44
     PARTITION_RATIO = 0.8
     PARTITION_NUM = 4
     CROSSMAP = False
-
-    devices = [int(dev) for dev in DEVICES.split(',')]
-    N_GPU = len(devices)
-    tmp_devices = split_devices(devices)
 
     sample_ids = torch.rand(4, 512)
     sample_tgt = torch.rand(4, 512)
@@ -194,66 +193,43 @@ def get_gptj_mobiusmodel(config, DEVICES, nlayers, dropout=0.5, fp16=False):
     
     return mobius_model
 
-def get_gptj_gpipemodel(config, nlayers, dropout=0.5, fp16=False):
-    num_gpus = 8
+def get_gptj_gpipemodel(config, DEVICES, nlayers, dropout=0.5, fp16=False):
+    devices = [int(dev) for dev in DEVICES.split(',')]
+    num_gpus = len(devices)
+    
     partition_len = ((nlayers - 1) // num_gpus) + 1
 
-    module_list = [nn.Embedding(config.vocab_size, config.n_embd)]
-    module_list.append(nn.LayerNorm(config.n_embd, eps=config.layer_norm_epsilon))
     total_layers = 0
 
     balance = []
     for i in range(nlayers):
-        block = GPTJBlock(config=config)
         # Let ME !!!! decide the placement.
-        module_list.append(block)
         if i != 0 and i % (partition_len) == 0:
             balance.append(i + 2 - total_layers)
             total_layers = i + 2
     
-    module_list.append(nn.Linear(config.n_embd, config.vocab_size))
     balance.append(nlayers + 3 - total_layers)
     total_layers = nlayers + 3
     print(balance)
-    seq = nn.Sequential(*module_list)
     
-    DEVICES = "0,1,2,3,4,5,6,7"
-    devices = [int(dev) for dev in DEVICES.split(',')]
-    N_GPU = len(devices)
+    # gptj_model = GPTJForCausalLM(config)
+    # seq = nn.Sequential(*(gptj_model.to_layers()))
+    
+    module_list = []
+    tmp_list = [nn.Embedding(config.vocab_size, config.n_embd)]
+    tmp_list.append(nn.LayerNorm(config.n_embd, eps=config.layer_norm_epsilon))
+
+    for i in range(nlayers):
+        block = GPTJBlock(config=config)
+        tmp_list.append(block)
+        
+    tmp_list.append(nn.Linear(config.n_embd, config.vocab_size))
+    seq = torch.nn.Sequential(*tmp_list)
 
     if fp16:
         seq = seq.half()
 
     # -- chunks = 4 is pipeline setting.
-    model = GPipe(seq, balance=balance, devices=devices, chunks=4)
+    model = GPipe(seq, balance=balance, devices=devices, chunks=num_gpus, checkpoint='always')
 
     return model
-
-if __name__ == '__main__':
-    from torch.distributed import rpc
-    tmpfile = tempfile.NamedTemporaryFile()
-    rpc.init_rpc(
-        name="worker",
-        rank=0,
-        world_size=1,
-        rpc_backend_options=rpc.TensorPipeRpcBackendOptions(
-            init_method="file://{}".format(tmpfile.name),
-            # Specifying _transports and _channels is a workaround and we no longer
-            # will have to specify _transports and _channels for PyTorch
-            # versions >= 1.8.1
-            _transports=["ibv", "uv"],
-            _channels=["cuda_ipc", "cuda_basic"],
-        )
-    )
-
-    tokenizer = AutoTokenizer.from_pretrained("EleutherAI/gpt-j-6B")
-    config = GPTJConfig.from_pretrained('EleutherAI/gpt-j-6B')
-
-    model = get_gptj_pipemodel(config, config.n_layer, len(tokenizer))
-
-    print(model)
-    # model.eval()
-    # with torch.no_grad():
-    #     x = torch.randint(0, 50257, (1, 1024)).cuda()
-    #     y = model(x)
-    #     print(y.shape)

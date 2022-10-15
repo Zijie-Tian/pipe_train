@@ -231,10 +231,6 @@ class MobiusTensorAttribute(object):
         self.is_activation = False
         self.cpu_mem: ContiguousMemoryAllocator = None
 
-        # schedule
-        # self.start_uploadwait_upload = torch.cuda.Event(enable_timing=False)
-        self.end_upload_event = torch.cuda.Event(enable_timing=False)
-        # self.start_compute_event = torch.cuda.Event(enable_timing=False)
 
 
     def get_position(self):
@@ -262,45 +258,42 @@ class MobiusTensorAttribute(object):
     def upload_param(self):
         if self.position == MobiusPosistion.GPU:
             return 
-        with use_stream(self.upload_stream):
-            # get a tensor from allocator
-            if  self.device_mem.dtype == self.cpu_param_tensor.dtype:
+        
+        else:
+            with use_stream(self.upload_stream):
+                # get a tensor from allocator
+                if  self.device_mem.dtype == self.cpu_param_tensor.dtype:
 
-                self.device_tmp_param_tensor = self.device_mem.allocate_tensor(self.numel)
-                self.activation_tensor_id = id(self.device_tmp_param_tensor)
+                    self.device_tmp_param_tensor = self.device_mem.allocate_tensor(self.numel)
+                    self.activation_tensor_id = id(self.device_tmp_param_tensor)
 
-                # transfer the data from the cpu tensor
-                self.device_tmp_param_tensor.copy_(self.cpu_param_tensor.view([self.numel]), non_blocking=True)
+                    # transfer the data from the cpu tensor
+                    self.device_tmp_param_tensor.copy_(self.cpu_param_tensor.view([self.numel]), non_blocking=True)
 
-                # assign the buffer to the working tensor
-                self.device_mem.assign_to_param(
-                    self.device_tmp_param_tensor, 
-                    self.device_param_tensor, 
-                    self.numel, self.shape
-                )
+                    # assign the buffer to the working tensor
+                    self.device_mem.assign_to_param(
+                        self.device_tmp_param_tensor, 
+                        self.device_param_tensor, 
+                        self.numel, self.shape
+                    )
 
-            else:
-                self.device_param_tensor.data = self.cpu_param_tensor.to(self.device, non_blocking=True).view(self.shape)
-                
-            if torch.isnan(self.device_param_tensor.data).any():
-                print('nan in upload')
-                print("device_param_tensor : ", self.device_param_tensor)
-                exit(-1)
+                else:
+                    self.device_param_tensor.data = self.cpu_param_tensor.to(self.device, non_blocking=True).view(self.shape)
 
 
-            # if activation, cpu buffer should be freed
-            if self.is_activation:
-                if self.cpu_mem != None:
-                    self.cpu_mem.release_tensor(self.cpu_param_tensor)
-                    self.cpu_param_tensor.data = torch.empty(0, 
-                        dtype=self.cpu_param_tensor.data.dtype, 
-                        device=self.cpu_param_tensor.data.device) 
+                # if activation, cpu buffer should be freed
+                if self.is_activation:
+                    if self.cpu_mem != None:
+                        self.cpu_mem.release_tensor(self.cpu_param_tensor)
+                        self.cpu_param_tensor.data = torch.empty(0, 
+                            dtype=self.cpu_param_tensor.data.dtype, 
+                            device=self.cpu_param_tensor.data.device) 
 
             # flag the position of the tensor.data
             self.position = MobiusPosistion.GPU
 
     @torch.no_grad()
-    def free_fwd_param(self):
+    def free_fwd_param(self):  
         # if self.forward_offload:
         # TODO(fyy) the parameter should update
         #       or it update in the cpu (need offload)
@@ -308,19 +301,22 @@ class MobiusTensorAttribute(object):
         self.free_param()
 
     @torch.no_grad()   
-    def free_param(self):
+    def free_param(self):   
+        
         if self.position == MobiusPosistion.CPU:
             return 
 
-        self.position = MobiusPosistion.CPU
+
         if  self.device_mem.dtype == self.cpu_param_tensor.dtype:
             self.device_mem.release_tensor(self.device_tmp_param_tensor)
         self.device_param_tensor.data = torch.empty(0, 
                         dtype=self.device_param_tensor.data.dtype, 
                         device=self.device_param_tensor.data.device) 
+        
+        self.position = MobiusPosistion.CPU
 
     @torch.no_grad()
-    def free_param_and_offload_grad(self):
+    def free_param_and_offload_grad(self):  
         if self.position == MobiusPosistion.CPU:
             return 
 
@@ -328,37 +324,12 @@ class MobiusTensorAttribute(object):
             # transfer grad     
             if not torch.isnan(self.device_param_tensor.grad).any():
                 self.cpu_param_tensor.grad.copy_(self.device_param_tensor.grad, non_blocking=True)
-            # if not GRADIENT_OVERFLOW:
-            #     if not torch.isnan(self.device_param_tensor.grad).any():
-            #         self.cpu_param_tensor.grad.copy_(self.device_param_tensor.grad, non_blocking=True)
-            #     else:
-            #         GRADIENT_OVERFLOW = True
-
-            # a = torch.isnan(self.cpu_param_tensor.grad).any()
-            # b = torch.isnan(self.device_param_tensor.grad).any()
-            # if a or b:
-            #     print('nan or inf in grad')
-            #     print("cpu_param_tensor ", self.cpu_param_tensor.grad)
-            #     print(a)
-            #     print("device_param_tensor ", self.device_param_tensor.grad)
-            #     print(b)
-            #     exit(-1)
-            
+                self.cpu_param_tensor.gradient_overflow = False
+            else:
+                self.cpu_param_tensor.gradient_overflow = True
+      
                 
-
-            # set the grad to None
-            # if self.device_param_tensor.grad.shape == torch.Size([50400, 4096]):
-            #     tmp = self.device_param_tensor.grad.to("cuda:2")
-            #     print("GPU", torch.norm(self.device_param_tensor.grad, 2))
-            #     print("GPU 2", torch.norm(tmp, 2))
-            #     print("GPU sum", self.device_param_tensor.grad.sum())
-            #     tmp = self.cpu_param_tensor.grad.to("cuda:2")
-            #     print("CPU", torch.norm(self.cpu_param_tensor.grad, 2, dtype=torch.float32))
-            #     print("CPU 2", torch.norm(tmp, 2))
-            #     print("CPU sum", tmp.sum())
-                
-                
-            # self.offload_stream.synchronize()
+            self.offload_stream.synchronize()
             self.device_param_tensor.grad = None
             
             # if self.backward_offload:
@@ -371,6 +342,7 @@ class MobiusTensorAttribute(object):
 # step1. copy the module's param in cpu
 # step2. send the param in cpu to gpu
 # step3. clear the gpu's tensor
+@torch.no_grad()
 def register_mobius_param_in_cpu(param, 
                                  upload_stream, 
                                  offload_stream, 
@@ -396,12 +368,9 @@ def register_mobius_param_in_cpu(param,
                                                 not is_tail,
                                                 not is_head,
                                                 half_mode,)
-
-    if is_head:
-        param.mobius_tensor_attr.upload_param()
     
 
-
+@torch.no_grad()
 def register_mobius_param_in_gpu(param,
                                  upload_stream,
                                  offload_stream,
@@ -434,6 +403,7 @@ def register_mobius_param_in_gpu(param,
         offload_stream.synchronize()
 
 
+@torch.no_grad()
 def register_mobius_module(module,
                            microbatch_num,
                            upload_stream,
@@ -442,7 +412,7 @@ def register_mobius_module(module,
                            cpu_mem,
                            device_mems,
                            ):
-   module.mobius_module_attr = MobiusModuleAttribute(
+    module.mobius_module_attr = MobiusModuleAttribute(
                                         microbatch_num, 
                                         upload_stream, 
                                         offload_stream, 

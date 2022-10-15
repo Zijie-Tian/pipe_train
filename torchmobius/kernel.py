@@ -5,7 +5,7 @@ import enum
 from typing import TYPE_CHECKING, Any, Iterable, List, Optional, Tuple, Union, cast, Dict
 import time
 
-from numpy import clip 
+from numpy import clip, partition 
 
 import torch
 from torch import Tensor, nn
@@ -74,8 +74,6 @@ class MobiusKernel(Module):
         super().__init__()
         
         module = module
-        # for profile
-        # self.module.mobius_backup = True 
         
         # for design
         self.cross_map = cross_map
@@ -96,7 +94,6 @@ class MobiusKernel(Module):
         self.devices = [torch.device(d) for d in devices]
         sample = sample.to(self.devices[0])
         
-        self.chunks = chunks
         self.checkpoint = checkpoint
         
         self.max_microbatch_param = max_microbatch_param
@@ -147,6 +144,7 @@ class MobiusKernel(Module):
         
         # move the submodel to the gpu
         self.partitions, self.sub_partitions = self._move_model(module)
+        self.chunks = chunks
         
         # add hook of the model
         
@@ -167,11 +165,12 @@ class MobiusKernel(Module):
         self.last_run_time = None
         self.last_n_multi_fwd = 1
         
-        self.compute_stream: Dict[torch.device, List] = {}
-        for device in self.devices:
-            self.compute_stream[device] = []
-            for _ in range(self.chunks):
-                self.compute_stream[device].append(torch.cuda.Stream(device))   
+        self.compute_stream = []
+        for device in self.virtual_devices:
+            self.compute_stream.append(torch.cuda.Stream(device))
+        #     self.compute_stream[device] = []
+        #     for _ in range(self.chunks):
+        #         self.compute_stream[device].append(torch.cuda.Stream(device))   
                 
         mobius_logger("Mobius finish initialization.")
         
@@ -261,12 +260,11 @@ class MobiusKernel(Module):
                     for _, next_tensor in gpu_partitions[i - prefetch_num].named_parameters(recurse=True):
                         first_child.mobius_module_attr.bind_bwd_tensor(next_tensor, 0)
                         
-                    for _, future_module in gpu_partitions[i - prefetch_num].named_children():
-                        # FIXME(fyy) multiple microbatch forward ???
-                        for batch_i in range(self.chunks):
-                            # NOTE(fyy) when to upload activation is a problem
-                            # if too early, there is not enough space
-                            transfer_future_activation[tuple([j * i, batch_i])] = tuple([child, 0])
+                    # for _, future_module in gpu_partitions[i - prefetch_num].named_children():
+                    #     for batch_i in range(self.chunks):
+                    #         # NOTE(fyy) when to upload activation is a problem
+                    #         # if too early, there is not enough space
+                    #         transfer_future_activation[tuple([j * i, batch_i])] = tuple([child, 0])
                 
                 # forward
                 if i + prefetch_num < len(gpu_partitions):
@@ -278,8 +276,7 @@ class MobiusKernel(Module):
         
         register_hooks_on_module(init_module, transfer_future_activation)
         return transfer_future_activation
-    
-    
+      
     
     def parameters(self):
         params = []
@@ -288,28 +285,6 @@ class MobiusKernel(Module):
             params.append(param.mobius_tensor_attr.cpu_param_tensor)
             param.mobius_tensor_attr.cpu_param_tensor.requires_grad = True
         return params
-
-    
-    def DEBUG(self):
-        count = 0
-        for param in self.partitions.parameters():
-            count += 1
-            if count == 20:
-                print(param.mobius_tensor_attr.cpu_param_tensor[0])
-                print(param.mobius_tensor_attr.cpu_param_tensor.grad[0])
-                break
-    
-    def zero_grad(self, set_to_none: bool = False):
-        for param in self.partitions.parameters():
-            if param.mobius_tensor_attr.cpu_param_tensor.grad is not None:
-                if set_to_none:
-                    param.mobius_tensor_attr.cpu_param_tensor.grad = None
-                else:
-                    if param.mobius_tensor_attr.cpu_param_tensor.grad.grad_fn is not None:
-                        param.mobius_tensor_attr.cpu_param_tensor.grad.detach_()
-                    else:
-                        param.mobius_tensor_attr.cpu_param_tensor.grad.requires_grad_(False)
-                    param.mobius_tensor_attr.cpu_param_tensor.grad.zero_()
         
 
     # Mobius manages the data and model moving between kinds of device
@@ -327,7 +302,7 @@ class MobiusKernel(Module):
         if not self._copy_streams:
             # activation copy have higher priority
             for device in self.devices:
-                self._copy_streams.append([torch.cuda.Stream(device, priority=1) for _ in range(self.chunks * 2)])
+                self._copy_streams.append([torch.cuda.Stream(device, priority=1) for _ in range(self.chunks)])
         return self._copy_streams
 
             
@@ -341,6 +316,9 @@ class MobiusKernel(Module):
         if not self.devices:
             # Empty sequential module is not illegal.
             return input
+        
+        # Divide a mini-batch into micro-batches.
+        batches = microbatch.scatter(input, self.chunks)
 
         # Separate CUDA streams for copy.
         copy_streams = self._ensure_copy_streams()
@@ -355,74 +333,28 @@ class MobiusKernel(Module):
         else:
             checkpoint_stop = 0
             
-        if fix_head_number != -1:
-            # Run pipeline parallelism.
-            pipeline = MobiusPipeline(  input,
-                                        self.partitions,
-                                        self.compute_stream,
-                                        self.devices,
-                                        self.virtual_devices,
-                                        copy_streams,
-                                        self._skip_layout,
-                                        checkpoint_stop,
-                                        self.transfer_future_activation,
-                                        self.act_upload_streams_dic, 
-                                        self.act_offload_streams_dic,
-                                        fix_head_number)
-            
-            self.n_multi_fwd = fix_head_number
-            
-            torch.cuda.nvtx.range_push("fwd")
-            tick = time.time()
-            batches = pipeline.run()
-            tock = time.time()
-            torch.cuda.nvtx.range_pop()
-            
-            run_time = tock - tick
-            # mobius_logger(f"Mobius forward time: {run_time}")
-            
-        else:
-            # Run pipeline parallelism.
-            pipeline = MobiusPipeline(  input,
-                                        self.partitions,
-                                        self.compute_stream,
-                                        self.devices,
-                                        self.virtual_devices,
-                                        copy_streams,
-                                        self._skip_layout,
-                                        checkpoint_stop,
-                                        self.transfer_future_activation,
-                                        self.act_upload_streams_dic, 
-                                        self.act_offload_streams_dic,
-                                        self.n_multi_fwd)
-            
-            if not self.n_multi_fwd_stable:
-                tick = time.time()
-                batches = pipeline.run()
-                tock = time.time()
-                
-                run_time = tock - tick
-                if self.last_run_time == None:
-                    self.last_run_time = run_time
-                    self.last_n_multi_fwd = self.n_multi_fwd
-                    self.n_multi_fwd += 1
-                else:
-                    if self.last_run_time > run_time:
-                        self.last_run_time = run_time
-                        self.last_n_multi_fwd = self.n_multi_fwd
-                        self.n_multi_fwd += 1
-                    else:
-                        self.n_multi_fwd -= 1
-                        self.n_multi_fwd_stable = True
 
-                if self.max_microbatch_param <= self.n_multi_fwd:
-                    self.n_multi_fwd_stable = True
-                    self.n_multi_fwd = self.max_microbatch_param
-                    
-                mobius_logger(f"Mobius microbatch parallelism: {self.n_multi_fwd_stable} time: {run_time} {self.n_multi_fwd}")
-            else:
-                batches = pipeline.run()
-                
+        # Run pipeline parallelism.
+        pipeline = MobiusPipeline(      batches,
+                                        self.partitions,
+                                        self.compute_stream,
+                                        self.devices,
+                                        self.virtual_devices,
+                                        copy_streams,
+                                        self._skip_layout,
+                                        checkpoint_stop,
+                                        self.transfer_future_activation,
+                                        self.act_upload_streams_dic, 
+                                        self.act_offload_streams_dic,
+                                        1)
+        
+        # from torchgpipe.pipeline import Pipeline
+        # pipeline = Pipeline (batches,
+        #             self.partitions,
+        #             self.devices,
+        #             checkpoint_stop=checkpoint_stop)
+            
+        pipeline.run()
 
         # Merge the micro-batches into one mini-batch.
         output = microbatch.gather(batches)
