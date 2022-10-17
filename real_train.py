@@ -1,8 +1,9 @@
+from sched import scheduler
 import time
 
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, RandomSampler
 
 from model import Encoder, Decoder, PositionalEncoding, get_gptj_gpipemodel, get_gptj_mobiusmodel, get_gptj_pipemodel
 import torchmobius
@@ -22,12 +23,12 @@ import deepspeed.runtime
 import wandb
 
 epochs      =   15  # The number of epochs
-bsz         =   8   # Batch size for training
+bsz         =   16   # Batch size for training
 
 WANDB = True
 
 if WANDB:
-    wandb.init(project="test", entity="thu-storage",
+    wandb.init(project="mobius", entity="thu-storage",
     config={"epochs": epochs, "batch_size": bsz},
     )
     # wandb.define_metric("train_loss", step_metric="time_step")
@@ -36,7 +37,7 @@ start_time = time.time()
 
 # ------------------- Attention -------------------
 # Set the random seed manually for reproducibility.
-setup_seed(2022)
+setup_seed(2021)
 # ------------------- Attention -------------------
 
 train_iter, val_iter, test_iter = WikiText2()
@@ -53,9 +54,12 @@ class WT2_Dataset2(torch.utils.data.Dataset):
 
         self.inputs = []
         self.labels = []
-        self.nbatch = 1200
-        print("train data size: ", train_data.size())
-        print("raw data size: ", _train_data.size())
+        # -------------------
+        # Fix the batch is 10000
+        self.nbatch = 10000
+        # -------------------
+        # print("train data size: ", train_data.size())
+        # print("raw data size: ", _train_data.size())
         for i in range(self.nbatch):
             input_ids, tgt = self.get_batch(train_data, i)
             self.inputs.append(input_ids)
@@ -66,10 +70,12 @@ class WT2_Dataset2(torch.utils.data.Dataset):
         return torch.cat(tuple(filter(lambda t: t.numel() > 0, data)))
 
     def batchify(self, data, bsz):
-        nbatch = data.size(0) // bsz
-        data = data.narrow(0, 0, nbatch * bsz)
-        data = data.view(bsz, -1).t().contiguous()
-        return data
+        self.nbatch = data.size(0) // bsz
+        # print("before: ", data.size(), bsz, nbatch)
+        batched_data = torch.narrow(data, 0, 0, self.nbatch * bsz)
+        # print("after: ", batched_data.size(), bsz, nbatch)
+        ret = batched_data.view(bsz, -1).t().contiguous()
+        return ret
 
     def get_batch(self, source, i):
         seq_len = min(self.bptt, len(source) - 1 - i)
@@ -85,10 +91,8 @@ class WT2_Dataset2(torch.utils.data.Dataset):
 
 def train(model, train_dl, optimizer, criterion, scheduler, epochs=1, log_interval = 1, fp16=False):
 
-    # for batch_id, data in enumerate(train_dl):
-    #     sample_ids, sample_labels = data
-    #     break
     
+    _step = 0
     for epoch in range(1, epochs + 1):
         for batch_id, data in enumerate(train_dl):
             
@@ -99,12 +103,12 @@ def train(model, train_dl, optimizer, criterion, scheduler, epochs=1, log_interv
             output = model(sample_ids.to("cuda:0"))
             torch.cuda.synchronize()
             
-            loss = criterion(output.view(-1, config.vocab_size).float(), sample_labels.view(-1).cuda(output.device))
+            loss = criterion(output.view(-1, config.vocab_size), sample_labels.view(-1).cuda(output.device))
             
             loss.backward()
             torch.cuda.synchronize()
             
-            mobius_logger('| epoch {:3d} | step {:3d} | loss {:5.2f} '.format(epoch, batch_id, loss))
+            mobius_logger('| epoch {:3d} | step {:3d} | loss {:5.2f} '.format(epoch, batch_id * bsz, loss))
                                             
             if fp16 and has_overflow_serial(model.parameters()):
                 mobius_logger("GRADIENT OVERFLOW!")
@@ -129,16 +133,48 @@ def train(model, train_dl, optimizer, criterion, scheduler, epochs=1, log_interv
             scheduler.step()
 
             log_dict = {
-                "train_loss": loss,
-                "learning_rate": scheduler.get_last_lr()[0],
-            }
+                    "train_loss": loss,
+                    "learning_rate": scheduler.get_last_lr()[0],
+            }  
+                
             if WANDB:
-                wandb.log(log_dict)
+                wandb.log(log_dict, step=_step)
+                _step += bsz
+
+from torch.utils.data import Sampler
+class CustomSampler(Sampler):
+    def __init__(self, data):
+        self.data = data
+
+    def __iter__(self):
+        import pickle
+        filename = 'training_preload_indices'
+        try:
+            with open (filename, 'rb') as f: 
+                indices = pickle.load(f) 
+            f.close()
+            return iter(indices)
+        except IOError:
+                pass
+        
+        
+        # data_sampler = RandomSampler(train_set)
+        # indices = [i for i in data_sampler]
+        
+        with open (filename, 'wb') as f:
+            pickle.dump(indices, f)
             
+        return iter(indices)
+
+    def __len__(self):
+        return len(self.data)
+    
+
 
 if __name__ == '__main__':
-    FP16_mode   = True
+    FP16_mode   = False
     DEVICES     = "0,1,4,5"
+    # DEVICES     = "0,1,4,5"
     
     config      = GPTJConfig.from_pretrained('gpt-j-6B')
 
@@ -148,10 +184,11 @@ if __name__ == '__main__':
 
     criterion = nn.CrossEntropyLoss()
     
-    optimizer = torch.optim.SGD(model.parameters(), lr=0.001, weight_decay=3e-7)
-    # optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-    # optimizer = DeepSpeedCPUAdam(model.parameters(), lr=0.001, betas=[0.8, 0.999])
-    scheduler = deepspeed.runtime.lr_schedules.OneCycle(optimizer, cycle_min_lr=0.0005, cycle_max_lr=0.1)
+    # optimizer = torch.optim.SGD(model.parameters(), lr=0, weight_decay=3e-7)
+    optimizer = torch.optim.Adam(model.parameters())
+    # optimizer = DeepSpeedCPUAdam(model.parameters())
+    scheduler = deepspeed.runtime.lr_schedules.OneCycle(optimizer, cycle_min_lr=0, cycle_max_lr=0.0001)
+    # scheduler = None
 
     if WANDB:
         wandb.watch(
@@ -161,6 +198,10 @@ if __name__ == '__main__':
         )
 
     train_set = WT2_Dataset2(train_iter, 1, 512)
-    train_dl = DataLoader(dataset=train_set, batch_size=bsz, num_workers=1, shuffle=False)
+    data_sampler = CustomSampler(train_set)
+    train_dl = DataLoader(dataset=train_set, 
+                          batch_size=bsz, 
+                          sampler=data_sampler,
+                          num_workers=1)
     
     train(model, train_dl, optimizer, criterion, scheduler, epochs=epochs, fp16=FP16_mode)

@@ -302,7 +302,6 @@ class MobiusTensorAttribute(object):
 
     @torch.no_grad()   
     def free_param(self):   
-        
         if self.position == MobiusPosistion.CPU:
             return 
 

@@ -181,7 +181,7 @@ def get_gptj_mobiusmodel(config, DEVICES, nlayers=-1, dropout=0.5, fp16=False):
                     devices=tmp_devices,
                     gpu_size_ratio=GPU_SIZE_RATIO,         
                     partition_ratio=PARTITION_RATIO,
-                    chunks=N_GPU,
+                    chunks=8,
                     sample=sample_ids,
                     max_microbatch_param=1,
                     model_name="Mobius_test",
@@ -197,34 +197,36 @@ def get_gptj_gpipemodel(config, DEVICES, nlayers, dropout=0.5, fp16=False):
     devices = [int(dev) for dev in DEVICES.split(',')]
     num_gpus = len(devices)
     
-    partition_len = ((nlayers - 1) // num_gpus) + 1
+    partition_len = ((nlayers) // num_gpus)
+    if partition_len % num_gpus != 0:
+        partition_len += 1
 
     total_layers = 0
 
-    balance = []
-    for i in range(nlayers):
-        # Let ME !!!! decide the placement.
-        if i != 0 and i % (partition_len) == 0:
-            balance.append(i + 2 - total_layers)
-            total_layers = i + 2
+    balance = [4, 4, 4, 4, 4, 4, 4, 4]
+    # for i in range(nlayers):
+    #     # Let ME !!!! decide the placement.
+    #     if i != 0 and i % (partition_len) == 0:
+    #         balance.append(i + 2 - total_layers)
+    #         total_layers = i + 2
     
-    balance.append(nlayers + 3 - total_layers)
-    total_layers = nlayers + 3
-    print(balance)
+    # balance.append(nlayers + 4 - total_layers)
+    # total_layers = nlayers + 4
+    # print(balance)
     
-    # gptj_model = GPTJForCausalLM(config)
-    # seq = nn.Sequential(*(gptj_model.to_layers()))
-    
-    module_list = []
-    tmp_list = [nn.Embedding(config.vocab_size, config.n_embd)]
-    tmp_list.append(nn.LayerNorm(config.n_embd, eps=config.layer_norm_epsilon))
-
-    for i in range(nlayers):
-        block = GPTJBlock(config=config)
-        tmp_list.append(block)
+    gptj_model = GPTJForCausalLM.from_pretrained("gpt-j-6B", config=config)
+    seq = nn.Sequential(*(gptj_model.to_layers()))
         
-    tmp_list.append(nn.Linear(config.n_embd, config.vocab_size))
-    seq = torch.nn.Sequential(*tmp_list)
+    # module_list = []
+    # tmp_list = [nn.Embedding(config.vocab_size, config.n_embd)]
+    # tmp_list.append(nn.LayerNorm(config.n_embd, eps=config.layer_norm_epsilon))
+
+    # for i in range(nlayers):
+    #     block = GPTJBlock(config=config)
+    #     tmp_list.append(block)
+        
+    # tmp_list.append(nn.Linear(config.n_embd, config.vocab_size))
+    # seq = torch.nn.Sequential(*tmp_list)
 
     if fp16:
         seq = seq.half()
