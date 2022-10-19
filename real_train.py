@@ -184,7 +184,7 @@ if __name__ == '__main__':
 
     criterion = nn.CrossEntropyLoss()
     
-    # optimizer = torch.optim.SGD(model.parameters(), lr=0, weight_decay=3e-7)
+    # optimizer = torch.optim.SGD(model.parameters(), lr=0, w∂eight_decay=3e-7)
     optimizer = torch.optim.Adam(model.parameters())
     # optimizer = DeepSpeedCPUAdam(model.parameters())
     scheduler = deepspeed.runtime.lr_schedules.OneCycle(optimizer, cycle_min_lr=0, cycle_max_lr=0.0001)
